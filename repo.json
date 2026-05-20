@@ -1,8 +1,8 @@
 {
-    "name": "Redowan's BDIX repository",
-    "description": "Redowan's BDIX repository",
+    "name": "Max's Repository",
+    "description": "Max's CloudStream repository",
     "manifestVersion": 1,
     "pluginLists": [
-      "https://raw.githubusercontent.com/redowan99/Redowan-CloudStream/builds/plugins.json"
+      "https://raw.githubusercontent.com/Gaming1806/Redowan-CloudStream/builds/plugins.json"
     ]
 }
