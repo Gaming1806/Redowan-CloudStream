@@ -1,59 +1,41 @@
-name: Build
-
-# https://docs.github.com/en/actions/learn-github-actions/workflow-syntax-for-github-actions#concurrency
-concurrency: 
-  group: "build"
-  cancel-in-progress: true
+name: Build and Push Plugins
 
 on:
   push:
     branches:
-      # choose your default branch
       - master
-      - main
-    paths-ignore:
-      - '*.md'
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@master
-        with:
-          path: "src"
+        uses: actions/checkout@v4
 
-      - name: Checkout builds
-        uses: actions/checkout@master
-        with:
-          ref: "builds"
-          path: "builds"
-      
-      - name: Clean old builds
-        run: rm $GITHUB_WORKSPACE/builds/*.cs3 || true
-
-      - name: Setup JDK 17
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
-          distribution: 'adopt'
+          java-version: 17
+          distribution: temurin
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v2
+        uses: android-actions/setup-android@v3
 
-      - name: Build Plugins
-        run: |
-          cd $GITHUB_WORKSPACE/src
-          chmod +x gradlew
-          ./gradlew make makePluginsJson
-          cp **/build/*.cs3 $GITHUB_WORKSPACE/builds
-          cp build/plugins.json $GITHUB_WORKSPACE/builds
+      - name: Make Gradle executable
+        run: chmod +x ./gradlew
 
-      - name: Push builds
+      - name: Build plugins
+        run: ./gradlew make
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+
+      - name: Push to builds branch
         run: |
-          cd $GITHUB_WORKSPACE/builds
-          git config --local user.email "actions@github.com"
-          git config --local user.name "GitHub Actions"
+          cd builds
+          git init
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .
-          git commit --amend -m "Build $GITHUB_SHA" || exit 0   # do not error if nothing to commit
-          git push --force
+          git commit -m "Build ${{ github.sha }}"
+          git push --force https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git HEAD:builds
