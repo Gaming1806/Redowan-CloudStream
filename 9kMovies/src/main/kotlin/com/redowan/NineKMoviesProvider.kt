@@ -27,7 +27,7 @@ import org.jsoup.nodes.Element
 //}
 
 open class NineKMoviesProvider : MainAPI() {
-    override var mainUrl = "https://9kmovies.ren/m"
+    override var mainUrl = "https://9kmovies.democrat"
     override var name = "9kMovies"
     override var lang = "en"
     override val hasMainPage = true
@@ -35,15 +35,21 @@ open class NineKMoviesProvider : MainAPI() {
     override val hasQuickSearch = false
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.NSFW)
     override val mainPage = mainPageOf(
-        "" to "Latest Movies",
-        "/category/18-movies/" to "18+ Movies",
-        "/category/bengali-movies/" to "Bengali",
-        "/category/dual-audio/" to "Dual Audio",
-        "/category/hindi-dubbed/" to "Hindi Dubbed",
-        "/category/hollywood-movies/" to "Hollywood",
-        "/category/tv-shows/" to "WWE",
-        "/category/original-web-series/" to "Web Series"
-    )
+    "$mainUrl/category/18-movies/" to "18+ Movies",
+    "$mainUrl/category/bengali/" to "Bengali",
+    "$mainUrl/category/bollywood/" to "Bollywood",
+    "$mainUrl/category/dual-audio/" to "Dual Audio",
+    "$mainUrl/category/hindi-dubbed/" to "Hindi Dubbed",
+    "$mainUrl/category/hollywood/" to "Hollywood",
+    "$mainUrl/category/kannada/" to "Kannada",
+    "$mainUrl/category/malayalam/" to "Malayalam",
+    "$mainUrl/category/marathi/" to "Marathi",
+    "$mainUrl/category/punjabi/" to "Punjabi",
+    "$mainUrl/category/tamil/" to "Tamil",
+    "$mainUrl/category/telugu/" to "Telugu",
+    "$mainUrl/category/tv-shows/" to "TV Shows",
+    "$mainUrl/category/web-series/" to "Web Series"
+)
 
     override suspend fun getMainPage(
         page: Int, request: MainPageRequest
