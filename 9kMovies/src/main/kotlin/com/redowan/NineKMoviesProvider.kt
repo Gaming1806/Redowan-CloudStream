@@ -27,7 +27,7 @@ import org.jsoup.nodes.Element
 //}
 
 open class NineKMoviesProvider : MainAPI() {
-    override var mainUrl = "https://9kmovies.democrat"
+    override var mainUrl = "https://9kmovies.democrat/"
     override var name = "9kMovies"
     override var lang = "en"
     override val hasMainPage = true
@@ -35,20 +35,20 @@ open class NineKMoviesProvider : MainAPI() {
     override val hasQuickSearch = false
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.NSFW)
     override val mainPage = mainPageOf(
-    "$mainUrl/category/18-movies/" to "18+ Movies",
-    "$mainUrl/category/bengali/" to "Bengali",
-    "$mainUrl/category/bollywood/" to "Bollywood",
-    "$mainUrl/category/dual-audio/" to "Dual Audio",
-    "$mainUrl/category/hindi-dubbed/" to "Hindi Dubbed",
-    "$mainUrl/category/hollywood/" to "Hollywood",
-    "$mainUrl/category/kannada/" to "Kannada",
-    "$mainUrl/category/malayalam/" to "Malayalam",
-    "$mainUrl/category/marathi/" to "Marathi",
-    "$mainUrl/category/punjabi/" to "Punjabi",
-    "$mainUrl/category/tamil/" to "Tamil",
-    "$mainUrl/category/telugu/" to "Telugu",
-    "$mainUrl/category/tv-shows/" to "TV Shows",
-    "$mainUrl/category/web-series/" to "Web Series"
+    "category/18-movies/" to "18+ Movies",
+    "category/bengali/" to "Bengali",
+    "category/bollywood/" to "Bollywood",
+    "category/dual-audio/" to "Dual Audio",
+    "category/hindi-dubbed/" to "Hindi Dubbed",
+    "category/hollywood/" to "Hollywood",
+    "category/kannada/" to "Kannada",
+    "category/malayalam/" to "Malayalam",
+    "category/marathi/" to "Marathi",
+    "category/punjabi/" to "Punjabi",
+    "category/tamil/" to "Tamil",
+    "category/telugu/" to "Telugu",
+    "category/tv-shows/" to "TV Shows",
+    "category/web-series/" to "Web Series"
 )
 
     override suspend fun getMainPage(
