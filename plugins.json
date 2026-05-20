@@ -1,0 +1,25 @@
+[
+    {
+        "iconUrl": "https://9kmovies.claims/m/wp-content/uploads/2019/08/9kmovies.ico",
+        "fileHash": "sha256-d33e438231213d2fdbc5aeb90348b33324f0d7622eefdf9c40a5ffea209fa16c",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/Gaming1806/Redowan-CloudStream",
+        "fileSize": 37660,
+        "status": 1,
+        "language": "hi",
+        "authors": [
+            "salman731",
+            "Dilip"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "NSFW"
+        ],
+        "version": 7,
+        "internalName": "9kMovies",
+        "description": "Included:10HitMovies",
+        "url": "https://raw.githubusercontent.com/Gaming1806/Redowan-CloudStream/builds/9kMovies.cs3",
+        "name": "9kMovies"
+    }
+]
