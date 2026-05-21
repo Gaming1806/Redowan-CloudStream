@@ -18,16 +18,8 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
 import org.jsoup.nodes.Element
 
-//suspend fun main() {
-//    val providerTester = com.lagradost.cloudstreamtest.ProviderTester(NineKMoviesProvider())
-//    providerTester.testAll()
-////    providerTester.testMainPage(verbose = true)
-////    providerTester.testSearch(query = "gun",verbose = true)
-////    providerTester.testLoad("")
-//}
-
 open class NineKMoviesProvider : MainAPI() {
-    override var mainUrl = "https://9kmovies.democrat/"
+    override var mainUrl = "https://9kmovies.democrat"
     override var name = "9kMovies"
     override var lang = "en"
     override val hasMainPage = true
@@ -35,55 +27,53 @@ open class NineKMoviesProvider : MainAPI() {
     override val hasQuickSearch = false
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.NSFW)
     override val mainPage = mainPageOf(
-    "category/18-movies/" to "18+ Movies",
-    "category/bengali/" to "Bengali",
-    "category/bollywood/" to "Bollywood",
-    "category/dual-audio/" to "Dual Audio",
-    "category/hindi-dubbed/" to "Hindi Dubbed",
-    "category/hollywood/" to "Hollywood",
-    "category/kannada/" to "Kannada",
-    "category/malayalam/" to "Malayalam",
-    "category/marathi/" to "Marathi",
-    "category/punjabi/" to "Punjabi",
-    "category/tamil/" to "Tamil",
-    "category/telugu/" to "Telugu",
-    "category/tv-shows/" to "TV Shows",
-    "category/web-series/" to "Web Series"
-)
+        "category/18-movies/" to "18+ Movies",
+        "category/bengali/" to "Bengali",
+        "category/bollywood/" to "Bollywood",
+        "category/dual-audio/" to "Dual Audio",
+        "category/hindi-dubbed/" to "Hindi Dubbed",
+        "category/hollywood/" to "Hollywood",
+        "category/kannada/" to "Kannada",
+        "category/malayalam/" to "Malayalam",
+        "category/marathi/" to "Marathi",
+        "category/punjabi/" to "Punjabi",
+        "category/tamil/" to "Tamil",
+        "category/telugu/" to "Telugu",
+        "category/tv-shows/" to "TV Shows",
+        "category/web-series/" to "Web Series"
+    )
 
     override suspend fun getMainPage(
         page: Int, request: MainPageRequest
     ): HomePageResponse {
-        val doc = app.get("$mainUrl${request.data}page/$page").document
-        val home = doc.select(".thumb.col-md-2.col-sm-4.col-xs-6").mapNotNull { toResult(it) }
+        val doc = app.get("$mainUrl/${request.data}page/$page").document
+        val home = doc.select("article.thumb-block").mapNotNull { toResult(it) }
         return newHomePageResponse(request.name, home, hasNext = true)
     }
 
     private fun toResult(post: Element): SearchResponse {
-        val url = post.select("figure> figcaption> a").attr("href")
-        val title = post.select("figure> figcaption> a").text()
-        val imageUrl = post.select("figure img").attr("src")
+        val url = post.selectFirst("a")?.attr("href") ?: return null
+        val title = post.selectFirst("header.entry-header span")?.text() ?: ""
+        val imageUrl = post.selectFirst("img.video-main-thumb")?.attr("src") ?: ""
         return newMovieSearchResponse(title, url, TvType.Movie) {
             this.posterUrl = imageUrl
-            this.posterHeaders = mapOf("Referer" to " https://9kmovies.ren/")
         }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val doc = app.get("$mainUrl/search/$query").document
-        val searchResponse = doc.select(".thumb.col-md-2.col-sm-4.col-xs-6")
-        return searchResponse.mapNotNull { toResult(it) }
+        val doc = app.get("$mainUrl/?s=$query").document
+        return doc.select("article.thumb-block").mapNotNull { toResult(it) }
     }
 
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url).document
-        val title = doc.select(".page-body h2").text()
-        val imageUrl = doc.select(".page-body > h2 > img").attr("src")
-        val story = doc.selectFirst(".page-body > p:nth-child(4)")?.html()
+        val title = doc.selectFirst("h1.entry-title")?.text() ?: ""
+        val imageUrl = doc.selectFirst("meta[property=og:image]")?.attr("content") ?: ""
+        val story = doc.selectFirst(".video-description")?.text()
         val episodesData = mutableListOf<Episode>()
         doc.select("a.buttn.direct").forEach {
             episodesData.add(
-                newEpisode(it.attr("href")){
+                newEpisode(it.attr("href")) {
                     this.name = it.text().replace(" Link 1", "")
                 }
             )
@@ -102,7 +92,7 @@ open class NineKMoviesProvider : MainAPI() {
     ): Boolean {
         val doc = app.post(data).document
         doc.select(".col-sm-8.col-sm-offset-2.well.view-well a").forEach {
-            val link = it.attr("href")//.replace("/v/","/e/")
+            val link = it.attr("href")
             loadExtractor(link, subtitleCallback, callback)
         }
         return true
