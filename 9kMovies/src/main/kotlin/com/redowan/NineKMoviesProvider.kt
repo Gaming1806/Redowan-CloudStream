@@ -18,6 +18,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import org.jsoup.nodes.Element
+import com.lagradost.cloudstream3.utils.newExtractorLink
 
 open class NineKMoviesProvider : MainAPI() {
     override var mainUrl = "https://9kmovies.democrat"
@@ -124,26 +125,28 @@ open class NineKMoviesProvider : MainAPI() {
         val m3u8Regex = Regex("""(https?://[^\s"'<>]+\.m3u8[^\s"'<>]*)""")
 
         mp4Regex.findAll(body).forEach {
-            callback.invoke(ExtractorLink(
-                source = name,
-                name = name,
-                url = it.value,
-                referer = finalUrl,
-                quality = getQualityFromUrl(data),
-                isM3u8 = false
-            ))
-        }
+    callback.invoke(newExtractorLink(
+        source = name,
+        name = name,
+        url = it.value,
+        type = com.lagradost.cloudstream3.utils.ExtractorLinkType.VIDEO
+    ) {
+        this.referer = finalUrl
+        this.quality = getQualityFromUrl(data)
+    })
+}
 
         m3u8Regex.findAll(body).forEach {
-            callback.invoke(ExtractorLink(
-                source = name,
-                name = name,
-                url = it.value,
-                referer = finalUrl,
-                quality = getQualityFromUrl(data),
-                isM3u8 = true
-            ))
-        }
+    callback.invoke(newExtractorLink(
+        source = name,
+        name = name,
+        url = it.value,
+        type = com.lagradost.cloudstream3.utils.ExtractorLinkType.M3U8
+    ) {
+        this.referer = finalUrl
+        this.quality = getQualityFromUrl(data)
+    })
+}
 
         // Try all hrefs on final page
         doc.select("a[href]").forEach { link ->
