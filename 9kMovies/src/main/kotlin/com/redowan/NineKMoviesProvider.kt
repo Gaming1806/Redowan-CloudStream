@@ -122,68 +122,86 @@ open class NineKMoviesProvider : MainAPI() {
     }
 }
 
-    override suspend fun loadLinks(
-        data: String,
-        isCasting: Boolean,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        // Follow all redirects to get final URL
-        val finalUrl = app.get(data, allowRedirects = true).url
-
-        // Try CloudStream built-in extractors first
-        if (loadExtractor(finalUrl, mainUrl, subtitleCallback, callback)) return true
-
-        // Scrape final page for direct links
-        val doc = app.get(finalUrl).document
-
-        // Look for direct mp4/m3u8 links
-        val body = doc.toString()
-        val mp4Regex = Regex("""(https?://[^\s"'<>]+\.mp4[^\s"'<>]*)""")
-        val m3u8Regex = Regex("""(https?://[^\s"'<>]+\.m3u8[^\s"'<>]*)""")
-
-        mp4Regex.findAll(body).forEach {
-    callback.invoke(newExtractorLink(
-        source = name,
-        name = name,
-        url = it.value,
-        type = com.lagradost.cloudstream3.utils.ExtractorLinkType.VIDEO
-    ) {
-        this.referer = finalUrl
-        this.quality = getQualityFromUrl(data)
-    })
-}
-
-        m3u8Regex.findAll(body).forEach {
-    callback.invoke(newExtractorLink(
-        source = name,
-        name = name,
-        url = it.value,
-        type = com.lagradost.cloudstream3.utils.ExtractorLinkType.M3U8
-    ) {
-        this.referer = finalUrl
-        this.quality = getQualityFromUrl(data)
-    })
-}
-
-        // Try all hrefs on final page
-        doc.select("a[href]").forEach { link ->
-            val href = link.attr("abs:href")
-            if (href.contains("download") || href.contains(".mp4") || href.contains("gdrive")) {
-                loadExtractor(href, finalUrl, subtitleCallback, callback)
-            }
-        }
-
-        return true
+override suspend fun loadLinks(
+    data: String,
+    isCasting: Boolean,
+    subtitleCallback: (SubtitleFile) -> Unit,
+    callback: (ExtractorLink) -> Unit
+): Boolean {
+    var currentUrl = data
+    
+    // Follow redirect chain up to 5 hops
+    repeat(5) {
+        val response = app.get(currentUrl, headers = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer" to mainUrl
+        ), allowRedirects = false)
+        
+        val nextUrl = response.headers["location"] ?: return@repeat
+        currentUrl = if (nextUrl.startsWith("http")) nextUrl 
+                     else "https://${currentUrl.substringAfter("://").substringBefore("/")}$nextUrl"
     }
 
-    private fun getQualityFromUrl(url: String): Int {
-        return when {
-            url.contains("1080") -> Qualities.P1080.value
-            url.contains("720") -> Qualities.P720.value
-            url.contains("480") -> Qualities.P480.value
-            url.contains("360") -> Qualities.P360.value
-            else -> Qualities.Unknown.value
+    // Try built-in extractors on final URL
+    if (loadExtractor(currentUrl, data, subtitleCallback, callback)) return true
+
+    // Scrape final page
+    val doc = app.get(currentUrl, headers = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer" to data
+    )).document
+    val body = doc.toString()
+
+    // Find direct video links
+    listOf(
+        Regex("""(https?://[^\s"'<>]+\.mp4[^\s"'<>]*)"""),
+        Regex("""(https?://[^\s"'<>]+\.mkv[^\s"'<>]*)"""),
+        Regex("""(https?://[^\s"'<>]+\.m3u8[^\s"'<>]*)"""),
+    ).forEach { regex ->
+        regex.findAll(body).forEach { match ->
+            val videoUrl = match.groupValues[1]
+            callback.invoke(newExtractorLink(
+                source = name,
+                name = "$name ${getQualityName(data)}",
+                url = videoUrl,
+                type = if (videoUrl.contains(".m3u8")) 
+                    com.lagradost.cloudstream3.utils.ExtractorLinkType.M3U8
+                else com.lagradost.cloudstream3.utils.ExtractorLinkType.VIDEO
+            ) {
+                this.referer = currentUrl
+                this.quality = getQualityFromUrl(data)
+            })
         }
     }
+
+    // Try all links on page
+    doc.select("a[href]").forEach { link ->
+        val href = link.attr("abs:href")
+        if (href.isNotEmpty() && href != currentUrl) {
+            loadExtractor(href, currentUrl, subtitleCallback, callback)
+        }
+    }
+
+    return true
+}
+
+private fun getQualityName(url: String): String {
+    return when {
+        url.contains("1080") -> "1080P"
+        url.contains("720") -> "720P"
+        url.contains("480") -> "480P"
+        url.contains("360") -> "360P"
+        else -> ""
+    }
+}
+
+private fun getQualityFromUrl(url: String): Int {
+    return when {
+        url.contains("1080") -> Qualities.P1080.value
+        url.contains("720") -> Qualities.P720.value
+        url.contains("480") -> Qualities.P480.value
+        url.contains("360") -> Qualities.P360.value
+        else -> Qualities.Unknown.value
+    }
+}
 }
