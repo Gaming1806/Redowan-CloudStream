@@ -300,7 +300,7 @@ open class NineKMoviesProvider : MainAPI() {
         return buildResponse(title, url, imageUrl, story, eps)
     }
 
-    private fun buildResponse(
+    private suspend fun buildResponse(
         title: String, url: String, imageUrl: String,
         story: String?, eps: MutableList<Episode>
     ) = newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps) {
