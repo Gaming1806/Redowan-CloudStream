@@ -66,35 +66,36 @@ open class NineKMoviesProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val doc = app.get(url).document
-        val title = doc.selectFirst("h1.entry-title")?.text() ?: ""
-        val imageUrl = doc.selectFirst("meta[property=og:image]")?.attr("content") ?: ""
-        val story = doc.selectFirst(".video-description")?.text()
-        val episodesData = mutableListOf<Episode>()
-        doc.select("a.buttn.direct").forEach {
-            episodesData.add(
-                newEpisode(it.attr("href")) {
-                    this.name = it.text().replace(" Link 1", "")
-                }
-            )
-        }
-        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodesData) {
-            this.posterUrl = imageUrl
-            this.plot = story?.trim()
-        }
+    val doc = app.get(url).document
+    val title = doc.selectFirst("h1.entry-title")?.text() ?: ""
+    val imageUrl = doc.selectFirst("meta[property=og:image]")?.attr("content") ?: ""
+    val story = doc.selectFirst(".video-description")?.text()
+    val episodesData = mutableListOf<Episode>()
+
+    // Get iframe embed link
+    val iframeSrc = doc.selectFirst(".video-player iframe")?.attr("src")
+    if (!iframeSrc.isNullOrEmpty()) {
+        episodesData.add(newEpisode(iframeSrc) { this.name = "Watch Online" })
     }
 
+    // Get download button link
+    doc.select("a.button[id=tracking-url]").forEach {
+        episodesData.add(newEpisode(it.attr("href")) { this.name = it.text() })
+    }
+
+    return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodesData) {
+        this.posterUrl = imageUrl
+        this.plot = story?.trim()
+    }
+}
+
     override suspend fun loadLinks(
-        data: String,
-        isCasting: Boolean,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        val doc = app.post(data).document
-        doc.select(".col-sm-8.col-sm-offset-2.well.view-well a").forEach {
-            val link = it.attr("href")
-            loadExtractor(link, subtitleCallback, callback)
-        }
-        return true
+    data: String,
+    isCasting: Boolean,
+    subtitleCallback: (SubtitleFile) -> Unit,
+    callback: (ExtractorLink) -> Unit
+): Boolean {
+    loadExtractor(data, subtitleCallback, callback)
+    return true
     }
 }
