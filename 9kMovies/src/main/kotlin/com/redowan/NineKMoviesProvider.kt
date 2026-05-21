@@ -1,3 +1,6 @@
+package com.redowan
+
+import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
@@ -6,6 +9,8 @@ import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mainPageOf
 import com.lagradost.cloudstream3.newEpisode
@@ -212,10 +217,8 @@ open class NineKMoviesProvider : MainAPI() {
                             "Accept"           to "application/json, text/javascript, */*; q=0.01",
                             "Content-Type"     to "application/json"
                         ),
-                        requestBody = okhttp3.RequestBody.create(
-                            okhttp3.MediaType.parse("application/json"),
-                            """{"file_code":"$fileCode","_token":"$csrfToken"}"""
-                        ),
+                        requestBody = """{"file_code":"$fileCode","_token":"$csrfToken"}"""
+    .toRequestBody("application/json".toMediaType()),
                         cookies = cookies
                     )
                     val jsonText = jsonPost.text
