@@ -66,22 +66,28 @@ open class NineKMoviesProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val doc = app.get(url).document
-        val title = doc.selectFirst("h1.entry-title")?.text() ?: ""
-        val imageUrl = doc.selectFirst("meta[property=og:image]")?.attr("content") ?: ""
-        val story = doc.selectFirst(".video-description")?.text()
-        val episodesData = mutableListOf<Episode>()
+    val doc = app.get(url, headers = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    )).document
+    val title = doc.selectFirst("h1.entry-title")?.text() ?: ""
+    val imageUrl = doc.selectFirst("meta[property=og:image]")?.attr("content") ?: ""
+    val story = doc.selectFirst(".video-description")?.text()
+    val episodesData = mutableListOf<Episode>()
 
-        // Get indimega link from download button
-        val indimegaUrl = doc.selectFirst("a.button#tracking-url")?.attr("href")
-        if (!indimegaUrl.isNullOrEmpty()) {
-            try {
-                // Follow redirect to get real indimega URL
-                val finalUrl = app.get(indimegaUrl).url
-                val indimegaDoc = app.get(finalUrl).document
+    // Try getting indimega URL - use flexible selector
+    val indimegaUrl = doc.selectFirst("a#tracking-url")?.attr("href")
+        ?: doc.selectFirst("a.button[href*='indimega']")?.attr("href")
 
-                // Scrape quality buttons from indimega
-                indimegaDoc.select("a.buttn.direct").forEach { btn ->
+    if (!indimegaUrl.isNullOrEmpty()) {
+        try {
+            val indimegaDoc = app.get(indimegaUrl, headers = mapOf(
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer" to mainUrl
+            )).document
+
+            val buttons = indimegaDoc.select("a.buttn.direct")
+            if (buttons.isNotEmpty()) {
+                buttons.forEach { btn ->
                     val btnUrl = btn.attr("href")
                     val btnText = btn.text().trim()
                     if (btnUrl.isNotEmpty()) {
@@ -90,19 +96,31 @@ open class NineKMoviesProvider : MainAPI() {
                         })
                     }
                 }
-            } catch (e: Exception) {
-                // fallback: add indimega link directly
+            } else {
+                // fallback: add indimega page itself
                 episodesData.add(newEpisode(indimegaUrl) {
                     this.name = "Download"
                 })
             }
-        }
-
-        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodesData) {
-            this.posterUrl = imageUrl
-            this.plot = story?.trim()
+        } catch (e: Exception) {
+            episodesData.add(newEpisode(indimegaUrl) {
+                this.name = "Download"
+            })
         }
     }
+
+    // Last resort fallback - add page url itself
+    if (episodesData.isEmpty()) {
+        episodesData.add(newEpisode(url) {
+            this.name = "Watch"
+        })
+    }
+
+    return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodesData) {
+        this.posterUrl = imageUrl
+        this.plot = story?.trim()
+    }
+}
 
     override suspend fun loadLinks(
         data: String,
