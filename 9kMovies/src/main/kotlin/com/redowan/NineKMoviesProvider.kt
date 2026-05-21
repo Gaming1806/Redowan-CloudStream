@@ -1,5 +1,3 @@
-package com.redowan
-
 import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
@@ -94,97 +92,183 @@ open class NineKMoviesProvider : MainAPI() {
         ).firstOrNull { !it.isNullOrBlank() }
     }
 
-    // ── Extract all URLs from a JS/HTML body that point to known video hosts ──
+    // ── Scan raw HTML/JS for any video URLs ───────────────────────────────────
     private fun extractUrlsFromHtml(html: String): List<String> {
         val found = mutableListOf<String>()
 
-        // All URL-like patterns referencing supported hosts or direct video files
-        val allUrlsRegex = Regex("""(https?://[^\s"'<>\[\]{}\\]+)""")
-        allUrlsRegex.findAll(html).forEach { m ->
-            val u = m.groupValues[1].trimEnd(')', ';', ',', '\\')
-            if (supportedHosts.any { u.contains(it, ignoreCase = true) } ||
-                u.contains(".mp4", ignoreCase = true) ||
-                u.contains(".m3u8", ignoreCase = true) ||
-                u.contains(".mkv", ignoreCase = true)
-            ) found.add(u)
+        fun isVideoUrl(u: String) =
+            supportedHosts.any { u.contains(it, ignoreCase = true) } ||
+            u.contains(".mp4", ignoreCase = true) ||
+            u.contains(".m3u8", ignoreCase = true) ||
+            u.contains(".mkv", ignoreCase = true)
+
+        // Plain URLs
+        Regex("""(https?://[^\s"'<>\[\]{}\\]+)""").findAll(html).forEach { m ->
+            val u = m.groupValues[1].trimEnd(')', ';', ',', '\\', '\'', '"', '\n')
+            if (isVideoUrl(u)) found.add(u)
         }
+        // window.location
+        Regex("""window\.location(?:\.href)?\s*[=:]\s*["'`](https?://[^"'`\s]+)""").findAll(html)
+            .forEach { found.add(it.groupValues[1]) }
+        // var/let/const x = "url"
+        Regex("""(?:var|let|const)\s+\w+\s*=\s*["'`](https?://[^"'`\s]+)""").findAll(html)
+            .forEach { found.add(it.groupValues[1]) }
+        // data-url / data-href etc.
+        Regex("""data-(?:url|href|link|src|file)\s*=\s*["'](https?://[^"']+)["']""").findAll(html)
+            .forEach { found.add(it.groupValues[1]) }
+        // meta refresh
+        Regex("""content=["'][0-9]*;\s*url=(https?://[^"']+)["']""", RegexOption.IGNORE_CASE).findAll(html)
+            .forEach { found.add(it.groupValues[1]) }
+        // atob() base64
+        Regex("""atob\(["'`]([A-Za-z0-9+/=]{20,})["'`]\)""").findAll(html).forEach { m ->
+            try {
+                val decoded = String(android.util.Base64.decode(m.groupValues[1], android.util.Base64.DEFAULT))
+                if (decoded.startsWith("http")) found.add(decoded.trim())
+            } catch (_: Exception) {}
+        }
+        // decodeURIComponent("%68%74%74...")
+        Regex("""decodeURIComponent\(["'`](https?%3[Aa][^"'`\s]+)["'`]\)""").findAll(html).forEach { m ->
+            try {
+                val decoded = java.net.URLDecoder.decode(m.groupValues[1], "UTF-8")
+                if (decoded.startsWith("http") && isVideoUrl(decoded)) found.add(decoded)
+            } catch (_: Exception) {}
+        }
+        // JSON "url":"..." "link":"..."
+        Regex(""""(?:url|link|file|src|href|download)"\s*:\s*"(https?://[^"]+)"""").findAll(html)
+            .forEach { found.add(it.groupValues[1]) }
 
-        // window.location / JS redirect patterns
-        Regex("""window\.location(?:\.href)?\s*[=:]\s*["'`](https?://[^"'`]+)["'`]""")
-            .findAll(html).forEach { found.add(it.groupValues[1]) }
-
-        // var url = / var link = / var file = / var src =
-        Regex("""(?:var|let|const)\s+(?:url|link|file|src|href|download)\s*=\s*["'`](https?://[^"'`]+)["'`]""")
-            .findAll(html).forEach { found.add(it.groupValues[1]) }
-
-        // data-url / data-href / data-link attributes
-        Regex("""data-(?:url|href|link|src)\s*=\s*["'](https?://[^"']+)["']""")
-            .findAll(html).forEach { found.add(it.groupValues[1]) }
-
-        // meta http-equiv refresh
-        Regex("""content=["'][0-9]*;\s*url=(https?://[^"']+)["']""", RegexOption.IGNORE_CASE)
-            .findAll(html).forEach { found.add(it.groupValues[1]) }
-
-        // atob() decoded base64 URLs — decode common base64 blobs
-        Regex("""atob\(["'`]([A-Za-z0-9+/=]{20,})["'`]\)""")
-            .findAll(html).forEach { m ->
-                try {
-                    val decoded = String(android.util.Base64.decode(m.groupValues[1], android.util.Base64.DEFAULT))
-                    if (decoded.startsWith("http")) found.add(decoded.trim())
-                } catch (_: Exception) {}
-            }
-
-        return found.distinct()
+        return found.filter { isVideoUrl(it) }.map { it.trimEnd('/') }.distinct()
     }
 
-    // ── Resolve uptobhai.blog/view/XXXXX → actual video host URL ─────────────
+    // ── Resolve uptobhai.blog/view/XXXXX → actual mirror URL ─────────────────
     private suspend fun getUptoLinks(uptoUrl: String): List<String> {
         val links = mutableListOf<String>()
         try {
-            // --- Pass 1: initial fetch ---
-            val r1       = app.get(uptoUrl, headers = ua + mapOf("Referer" to "https://indimega.com/"))
-            val cookies  = r1.cookies
-            val html1    = r1.text
-            val finalUrl1 = r1.url  // URL after any HTTP redirects
+            val fileCode = uptoUrl.trimEnd('/').substringAfterLast("/")
+            val siteBase = uptoUrl.substringBefore("://") + "://" +
+                           uptoUrl.substringAfter("://").substringBefore("/")
 
-            // If the request was redirected straight to a supported host, we're done
-            if (finalUrl1 != uptoUrl &&
-                supportedHosts.any { finalUrl1.contains(it, ignoreCase = true) }
-            ) {
-                links.add(finalUrl1)
-                return links
+            // ── Strategy 1: Try alternative URL patterns (direct download endpoints) ──
+            // Many shortener sites have /download/ or /file/ alongside /view/
+            val altUrls = listOf(
+                uptoUrl.replace("/view/", "/download/"),
+                uptoUrl.replace("/view/", "/file/"),
+                uptoUrl.replace("/view/", "/get/"),
+                uptoUrl.replace("/view/", "/dl/"),
+                "$siteBase/download/$fileCode",
+                "$siteBase/dl/$fileCode",
+                "$siteBase/file/$fileCode",
+                "$siteBase/f/$fileCode"
+            ).filter { it != uptoUrl }.distinct()
+
+            for (altUrl in altUrls) {
+                try {
+                    val r = app.get(altUrl, headers = ua + mapOf("Referer" to uptoUrl), allowRedirects = false)
+                    val location = r.headers["location"] ?: r.headers["Location"] ?: ""
+                    // Followed-redirect final URL
+                    val rFull = if (location.isNotBlank()) {
+                        app.get(altUrl, headers = ua + mapOf("Referer" to uptoUrl))
+                    } else r
+                    val finalUrl = rFull.url
+                    if (finalUrl != altUrl && finalUrl != uptoUrl &&
+                        supportedHosts.any { finalUrl.contains(it, ignoreCase = true) }) {
+                        links.add(finalUrl)
+                        return links
+                    }
+                    links.addAll(extractUrlsFromHtml(rFull.text))
+                } catch (_: Exception) {}
             }
+            if (links.isNotEmpty()) return links.distinct()
 
-            // Scan HTML / JS of the uptobhai page for embedded URLs
+            // ── Strategy 2: Initial page fetch ────────────────────────────────
+            val r1      = app.get(uptoUrl, headers = ua + mapOf("Referer" to "https://indimega.com/"))
+            val cookies = r1.cookies
+            val html1   = r1.text
+            val doc1    = r1.document
+            val final1  = r1.url
+
+            if (final1 != uptoUrl && supportedHosts.any { final1.contains(it, ignoreCase = true) }) {
+                return listOf(final1)
+            }
             links.addAll(extractUrlsFromHtml(html1))
+            if (links.isNotEmpty()) return links.distinct()
 
-            // --- cuid unlock (some uptobhai variants use this) ---
+            // ── Strategy 3: POST with CSRF token (Laravel pattern) ────────────
+            // uptobhai.blog is a Laravel app — download links are returned via POST
+            val csrfToken = doc1.selectFirst("meta[name='csrf-token']")?.attr("content")
+                ?: Regex("""["']?csrf[-_]token["']?\s*(?:content=|:)\s*["']([A-Za-z0-9+/=_-]{20,})["']""")
+                    .find(html1)?.groupValues?.get(1)
+                ?: doc1.selectFirst("input[name='_token']")?.attr("value")
+
+            if (!csrfToken.isNullOrBlank()) {
+                // Try JSON POST (most common Laravel pattern)
+                try {
+                    val jsonPost = app.post(
+                        uptoUrl,
+                        headers = ua + mapOf(
+                            "Referer"          to uptoUrl,
+                            "X-CSRF-TOKEN"     to csrfToken,
+                            "X-Requested-With" to "XMLHttpRequest",
+                            "Accept"           to "application/json, text/javascript, */*; q=0.01",
+                            "Content-Type"     to "application/json"
+                        ),
+                        requestBody = okhttp3.RequestBody.create(
+                            okhttp3.MediaType.parse("application/json"),
+                            """{"file_code":"$fileCode","_token":"$csrfToken"}"""
+                        ),
+                        cookies = cookies
+                    )
+                    val jsonText = jsonPost.text
+                    val jsonFinal = jsonPost.url
+                    if (supportedHosts.any { jsonFinal.contains(it, ignoreCase = true) }) links.add(jsonFinal)
+                    links.addAll(extractUrlsFromHtml(jsonText))
+                    try {
+                        val json = org.json.JSONObject(jsonText)
+                        listOf("url","link","file","download","src","href","redirect").forEach { key ->
+                            val v = json.optString(key, "")
+                            if (v.startsWith("http")) links.add(v)
+                        }
+                    } catch (_: Exception) {}
+                } catch (_: Exception) {}
+
+                // Try form POST
+                try {
+                    val formPost = app.post(
+                        uptoUrl,
+                        headers = ua + mapOf(
+                            "Referer"      to uptoUrl,
+                            "Content-Type" to "application/x-www-form-urlencoded",
+                            "Accept"       to "text/html,application/xhtml+xml,*/*"
+                        ),
+                        data = mapOf("_token" to csrfToken, "file_code" to fileCode, "op" to "download2"),
+                        cookies = cookies
+                    )
+                    val formFinal = formPost.url
+                    if (supportedHosts.any { formFinal.contains(it, ignoreCase = true) }) links.add(formFinal)
+                    links.addAll(extractUrlsFromHtml(formPost.text))
+                } catch (_: Exception) {}
+            }
+            if (links.isNotEmpty()) return links.distinct()
+
+            // ── Strategy 4: cuid unlock + re-fetch ───────────────────────────
             val cuidDomain = Regex("""https://([^/"'\s]+)/cuid/""").find(html1)?.groupValues?.get(1)
             if (!cuidDomain.isNullOrBlank()) {
-                val base = "https://" + uptoUrl.substringAfter("://").substringBefore("/")
                 try {
-                    app.get("https://$cuidDomain/cuid/?f=$base",
+                    app.get("https://$cuidDomain/cuid/?f=$siteBase",
                         headers = ua + mapOf("Referer" to uptoUrl), cookies = cookies)
                 } catch (_: Exception) {}
             }
 
-            // --- Pass 2: re-fetch after unlock attempt ---
-            val r2       = app.get(uptoUrl,
-                headers = ua + mapOf("Referer" to "https://indimega.com/"),
-                cookies = cookies)
-            val html2    = r2.text
-            val finalUrl2 = r2.url
+            val r2     = app.get(uptoUrl, headers = ua + mapOf("Referer" to "https://indimega.com/"), cookies = cookies)
+            val final2 = r2.url
+            val html2  = r2.text
 
-            if (finalUrl2 != uptoUrl &&
-                supportedHosts.any { finalUrl2.contains(it, ignoreCase = true) }
-            ) {
-                links.add(finalUrl2)
-                return links.distinct()
+            if (final2 != uptoUrl && supportedHosts.any { final2.contains(it, ignoreCase = true) }) {
+                return listOf(final2)
             }
-
             links.addAll(extractUrlsFromHtml(html2))
 
-            // Also collect plain <a href> and <iframe src> from parsed DOM
+            // DOM anchors and iframes
             val doc2 = r2.document
             doc2.select("a[href]").forEach { a ->
                 val href = a.attr("abs:href")
@@ -200,30 +284,23 @@ open class NineKMoviesProvider : MainAPI() {
                     links.add(src)
             }
 
-            // --- Pass 3: Try to find and follow a "Get Link" / "Download" button ---
-            // Some pages require a POST or a second GET to a /go/ or /download/ endpoint
-            val getUrlFromDoc: (org.jsoup.nodes.Document) -> String? = { d ->
-                d.select("a[href]").firstOrNull { a ->
-                    val cls = a.className()
-                    val txt = a.text().lowercase()
-                    (cls.contains("get") || cls.contains("download") || cls.contains("go") ||
-                     txt.contains("get link") || txt.contains("download") || txt.contains("click here") ||
-                     txt.contains("continue") || txt.contains("proceed")) &&
-                    a.attr("href").startsWith("http") &&
-                    !a.attr("href").contains("uptobhai", ignoreCase = true)
-                }?.attr("abs:href")
-            }
+            // ── Strategy 5: Follow any "Get Link" / "Click Here" button ──────
+            val goBtn = doc2.select("a[href]").firstOrNull { a ->
+                val cls = a.className().lowercase()
+                val txt = a.text().lowercase()
+                (cls.contains("get") || cls.contains("download") || cls.contains("go") ||
+                 txt.contains("get link") || txt.contains("download") ||
+                 txt.contains("click here") || txt.contains("continue") || txt.contains("proceed")) &&
+                a.attr("href").startsWith("http") &&
+                !a.attr("href").contains("uptobhai", ignoreCase = true)
+            }?.attr("abs:href")
 
-            val goUrl = getUrlFromDoc(doc2)
-            if (!goUrl.isNullOrBlank()) {
+            if (!goBtn.isNullOrBlank()) {
                 try {
-                    val r3    = app.get(goUrl, headers = ua + mapOf("Referer" to uptoUrl), cookies = cookies)
-                    val html3 = r3.text
+                    val r3    = app.get(goBtn, headers = ua + mapOf("Referer" to uptoUrl), cookies = cookies)
                     val final3 = r3.url
-                    if (supportedHosts.any { final3.contains(it, ignoreCase = true) }) {
-                        links.add(final3)
-                    }
-                    links.addAll(extractUrlsFromHtml(html3))
+                    if (supportedHosts.any { final3.contains(it, ignoreCase = true) }) links.add(final3)
+                    links.addAll(extractUrlsFromHtml(r3.text))
                 } catch (_: Exception) {}
             }
 
@@ -258,11 +335,10 @@ open class NineKMoviesProvider : MainAPI() {
         val hubDoc  = hubResponse.document
         val hubHtml = hubResponse.text
 
-        // ── Quality buttons: class "buttn direct" confirmed from debug ──────
+        // Confirmed class from debug: "buttn direct"
         val uptoButtons = hubDoc.select("a.buttn.direct, a.buttn, a[href*='upto']")
             .filter { it.attr("href").contains("upto", ignoreCase = true) }
             .ifEmpty {
-                // Fallback: any anchor with uptobhai/uptomega/upto in href
                 hubDoc.select("a[href]").filter { a ->
                     val h = a.attr("href")
                     h.contains("uptobhai", ignoreCase = true) ||
@@ -286,12 +362,12 @@ open class NineKMoviesProvider : MainAPI() {
                         eps.add(newEpisode(mirrorUrl) { this.name = "$label [$host]" })
                     }
                 } else {
-                    // Store the uptobhai URL directly — loadLinks will retry resolution
+                    // Store upto URL — user can at least "Play in Browser" on uptobhai page
                     eps.add(newEpisode("upto::$uptoUrl") { this.name = label })
                 }
             }
         } else {
-            // Fallback: scan hub page directly for supported hosts / iframes / video files
+            // Fallback: scan hub page directly
             hubDoc.select("a[href]").forEach { a ->
                 val href = a.attr("abs:href")
                 if (href.startsWith("http") && supportedHosts.any { href.contains(it, ignoreCase = true) })
@@ -302,9 +378,7 @@ open class NineKMoviesProvider : MainAPI() {
                 if (src.startsWith("http") && supportedHosts.any { src.contains(it, ignoreCase = true) })
                     eps.add(newEpisode(src) { this.name = "Stream" })
             }
-            extractUrlsFromHtml(hubHtml).forEach {
-                eps.add(newEpisode(it) { this.name = "Direct" })
-            }
+            extractUrlsFromHtml(hubHtml).forEach { eps.add(newEpisode(it) { this.name = "Direct" }) }
             if (eps.isEmpty()) eps.add(newEpisode(hubUrl) { this.name = "Open Hub" })
         }
 
@@ -333,7 +407,6 @@ open class NineKMoviesProvider : MainAPI() {
                 mirrors.forEach { resolveLink(it, subtitleCallback, callback) }
                 return true
             }
-            // Last resort: try loadExtractor directly on the upto URL
             loadExtractor(uptoUrl, mainUrl, subtitleCallback, callback)
             return true
         }
