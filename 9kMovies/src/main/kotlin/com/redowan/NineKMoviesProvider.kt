@@ -15,6 +15,7 @@ import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import org.jsoup.nodes.Element
 
@@ -43,9 +44,7 @@ open class NineKMoviesProvider : MainAPI() {
         "category/web-series/" to "Web Series"
     )
 
-    override suspend fun getMainPage(
-        page: Int, request: MainPageRequest
-    ): HomePageResponse {
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val doc = app.get("$mainUrl/${request.data}page/$page").document
         val home = doc.select("article.thumb-block").mapNotNull { toResult(it) }
         return newHomePageResponse(request.name, home, hasNext = true)
@@ -66,58 +65,104 @@ open class NineKMoviesProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-    val doc = app.get(url).document
-    val title = doc.selectFirst("h1.entry-title")?.text() ?: ""
-    val imageUrl = doc.selectFirst("meta[property=og:image]")?.attr("content") ?: ""
-    val story = doc.selectFirst(".video-description")?.text()
-    val episodesData = mutableListOf<Episode>()
+        val doc = app.get(url).document
+        val title = doc.selectFirst("h1.entry-title")?.text() ?: ""
+        val imageUrl = doc.selectFirst("meta[property=og:image]")?.attr("content") ?: ""
+        val story = doc.selectFirst(".video-description")?.text()
+        val episodesData = mutableListOf<Episode>()
 
-    // iframe (luluvid etc) - primary watch source
-    val iframeSrc = doc.selectFirst(".video-player iframe")?.attr("src")
-    if (!iframeSrc.isNullOrEmpty()) {
-        episodesData.add(newEpisode(iframeSrc) { this.name = "Watch Online" })
-    }
+        // Get indimega link from download button
+        val indimegaUrl = doc.selectFirst("a.button#tracking-url")?.attr("href")
+        if (!indimegaUrl.isNullOrEmpty()) {
+            try {
+                // Follow redirect to get real indimega URL
+                val finalUrl = app.get(indimegaUrl).url
+                val indimegaDoc = app.get(finalUrl).document
 
-    // download/redirect button
-    val downloadHref = doc.selectFirst("a.button#tracking-url")?.attr("href")
-    if (!downloadHref.isNullOrEmpty()) {
-        episodesData.add(newEpisode(downloadHref) { this.name = "Download" })
-    }
+                // Scrape quality buttons from indimega
+                indimegaDoc.select("a.buttn.direct").forEach { btn ->
+                    val btnUrl = btn.attr("href")
+                    val btnText = btn.text().trim()
+                    if (btnUrl.isNotEmpty()) {
+                        episodesData.add(newEpisode(btnUrl) {
+                            this.name = btnText
+                        })
+                    }
+                }
+            } catch (e: Exception) {
+                // fallback: add indimega link directly
+                episodesData.add(newEpisode(indimegaUrl) {
+                    this.name = "Download"
+                })
+            }
+        }
 
-    return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodesData) {
-        this.posterUrl = imageUrl
-        this.plot = story?.trim()
-    }
-}
-
-    override suspend fun loadLinks(
-    data: String,
-    isCasting: Boolean,
-    subtitleCallback: (SubtitleFile) -> Unit,
-    callback: (ExtractorLink) -> Unit
-): Boolean {
-    // Follow redirects to get the real URL
-    val finalUrl = app.get(data).url
-
-    // Try direct extraction on final URL
-    if (loadExtractor(finalUrl, subtitleCallback, callback)) return true
-
-    // If that fails, scrape the final page for links
-    val doc = app.get(finalUrl).document
-    doc.select("a[href]").forEach { link ->
-        val href = link.attr("abs:href")
-        if (href.contains(".mp4") || href.contains(".m3u8") ||
-            href.contains("stream") || href.contains("video")) {
-            loadExtractor(href, subtitleCallback, callback)
+        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodesData) {
+            this.posterUrl = imageUrl
+            this.plot = story?.trim()
         }
     }
 
-    // Also try iframe sources on the final page
-    doc.select("iframe[src]").forEach { iframe ->
-        val src = iframe.attr("abs:src")
-        if (src.isNotEmpty()) loadExtractor(src, subtitleCallback, callback)
+    override suspend fun loadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        // Follow all redirects to get final URL
+        val finalUrl = app.get(data, allowRedirects = true).url
+
+        // Try CloudStream built-in extractors first
+        if (loadExtractor(finalUrl, mainUrl, subtitleCallback, callback)) return true
+
+        // Scrape final page for direct links
+        val doc = app.get(finalUrl).document
+
+        // Look for direct mp4/m3u8 links
+        val body = doc.toString()
+        val mp4Regex = Regex("""(https?://[^\s"'<>]+\.mp4[^\s"'<>]*)""")
+        val m3u8Regex = Regex("""(https?://[^\s"'<>]+\.m3u8[^\s"'<>]*)""")
+
+        mp4Regex.findAll(body).forEach {
+            callback.invoke(ExtractorLink(
+                source = name,
+                name = name,
+                url = it.value,
+                referer = finalUrl,
+                quality = getQualityFromUrl(data),
+                isM3u8 = false
+            ))
+        }
+
+        m3u8Regex.findAll(body).forEach {
+            callback.invoke(ExtractorLink(
+                source = name,
+                name = name,
+                url = it.value,
+                referer = finalUrl,
+                quality = getQualityFromUrl(data),
+                isM3u8 = true
+            ))
+        }
+
+        // Try all hrefs on final page
+        doc.select("a[href]").forEach { link ->
+            val href = link.attr("abs:href")
+            if (href.contains("download") || href.contains(".mp4") || href.contains("gdrive")) {
+                loadExtractor(href, finalUrl, subtitleCallback, callback)
+            }
+        }
+
+        return true
     }
 
-    return true
-}
+    private fun getQualityFromUrl(url: String): Int {
+        return when {
+            url.contains("1080") -> Qualities.P1080.value
+            url.contains("720") -> Qualities.P720.value
+            url.contains("480") -> Qualities.P480.value
+            url.contains("360") -> Qualities.P360.value
+            else -> Qualities.Unknown.value
+        }
+    }
 }
