@@ -31,7 +31,19 @@ open class NineKMoviesProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.NSFW)
 
     private val ua = mapOf(
-        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language" to "en-US,en;q=0.9",
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    )
+
+    private val supportedHosts = listOf(
+        "streamtape", "mixdrop", "gofile.io", "voe.sx",
+        "doodstream", "dood.watch", "dood.la", "dood.to", "dood.wf",
+        "streamlare", "filelions", "streamhub", "upstream",
+        "megaup.net", "send.now", "savefiles.com", "vikingfile",
+        "vinovo.to", "frdl.io", "dsvplay", "clicknupload",
+        "streamwish", "filemoon", "mp4upload", "streamvid",
+        "embedrise", "vtube", "uqload"
     )
 
     override val mainPage = mainPageOf(
@@ -71,16 +83,58 @@ open class NineKMoviesProvider : MainAPI() {
         return doc.select("article.thumb-block").mapNotNull { toResult(it) }
     }
 
-    // Supported hosts CloudStream can extract from
-    private val supportedHosts = listOf(
-        "streamtape", "mixdrop", "gofile.io", "voe.sx",
-        "doodstream", "dood.watch", "dood.la", "dood.to", "dood.wf",
-        "streamlare", "filelions", "streamhub", "upstream",
-        "megaup.net", "send.now", "savefiles", "vikingfile",
-        "vinovo", "frdl.io", "dsvplay", "clicknupload",
-        "streamwish", "filemoon", "mp4upload", "streamvid",
-        "embedrise", "vtube", "uqload"
-    )
+    private suspend fun getUptoLinks(uptoUrl: String): List<String> {
+        val links = mutableListOf<String>()
+        try {
+            // Step 1: Initial page fetch to get cookies + find cuid domain
+            val initialResponse = app.get(
+                uptoUrl,
+                headers = ua + mapOf("Referer" to "https://indimega.com/")
+            )
+            val cookies = initialResponse.cookies
+            val initialBody = initialResponse.text
+
+            // Step 2: Find and call the cuid unlock endpoint
+            // The cuid domain is in the page JS and changes, find it dynamically
+            val cuidDomain = Regex("""https://([^/]+)/cuid/""")
+                .find(initialBody)?.groupValues?.get(1)
+
+            if (cuidDomain != null) {
+                val uptoBase = "https://" + uptoUrl.substringAfter("://").substringBefore("/")
+                app.get(
+                    "https://$cuidDomain/cuid/?f=${uptoBase}",
+                    headers = ua + mapOf("Referer" to uptoUrl),
+                    cookies = cookies
+                )
+            }
+
+            // Step 3: Fetch page again after unlock with same cookies
+            val unlockedDoc = app.get(
+                uptoUrl,
+                headers = ua + mapOf("Referer" to "https://indimega.com/"),
+                cookies = cookies
+            ).document
+
+            // Step 4: Collect all mirror links
+            unlockedDoc.select("a[href]").forEach { a ->
+                val href = a.attr("abs:href")
+                if (href.startsWith("http") &&
+                    !href.contains("uptobhai") &&
+                    supportedHosts.any { href.contains(it) }
+                ) {
+                    links.add(href)
+                }
+            }
+
+            // Step 5: Also scan raw HTML for direct video file links
+            val body = unlockedDoc.toString()
+            Regex("""(https?://[^\s"'<>]+\.(?:mp4|mkv|m3u8)[^\s"'<>]*)""")
+                .findAll(body).forEach { links.add(it.groupValues[1]) }
+
+        } catch (e: Exception) { }
+
+        return links.distinct()
+    }
 
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url, headers = ua).document
@@ -89,68 +143,41 @@ open class NineKMoviesProvider : MainAPI() {
         val story = doc.selectFirst(".video-description")?.text()
         val episodesData = mutableListOf<Episode>()
 
-        // Step 1: Get indimega URL from 9kmovies download button
         val indimegaUrl = doc.selectFirst("a#tracking-url")?.attr("href")
             ?: doc.selectFirst("a.button[href*='indimega']")?.attr("href")
 
         if (!indimegaUrl.isNullOrEmpty()) {
             try {
-                // Step 2: Fetch indimega page to get quality buttons (uptobhai links)
                 val indimegaDoc = app.get(
                     indimegaUrl,
                     headers = ua + mapOf("Referer" to mainUrl)
                 ).document
 
-                val qualityButtons = indimegaDoc.select("a.buttn.direct")
-
-                qualityButtons.forEach { btn ->
+                indimegaDoc.select("a.buttn.direct").forEach { btn ->
                     val uptoUrl = btn.attr("href")
-                    val qualityText = btn.text().trim() // e.g. "1080P [ 2.1GB ]"
+                    val qualityText = btn.text().trim()
                     if (uptoUrl.isEmpty()) return@forEach
 
-                    try {
-                        // Step 3: Fetch uptobhai page to get actual mirror links
-                        val uptoDoc = app.get(
-                            uptoUrl,
-                            headers = ua + mapOf("Referer" to "https://indimega.com/")
-                        ).document
-
-                        // Extract all mirror links from uptobhai page
-                        val mirrorLinks = uptoDoc.select("a[href]")
-                            .map { it.attr("abs:href") }
-                            .filter { link ->
-                                link.startsWith("http") &&
-                                !link.contains("uptobhai") &&
-                                supportedHosts.any { link.contains(it) }
-                            }
-
-                        if (mirrorLinks.isNotEmpty()) {
-                            // Add each mirror as a separate episode link
-                            mirrorLinks.forEach { mirrorUrl ->
-                                val hostName = supportedHosts
-                                    .firstOrNull { mirrorUrl.contains(it) }
-                                    ?.split(".")?.first()
-                                    ?.replaceFirstChar { it.uppercase() } ?: "Mirror"
-                                episodesData.add(newEpisode(mirrorUrl) {
-                                    this.name = "$qualityText [$hostName]"
-                                })
-                            }
-                        } else {
-                            // uptobhai blocked server request - store uptobhai URL as fallback
-                            episodesData.add(newEpisode(uptoUrl) {
-                                this.name = qualityText
+                    val mirrors = getUptoLinks(uptoUrl)
+                    if (mirrors.isNotEmpty()) {
+                        mirrors.forEach { mirrorUrl ->
+                            val host = supportedHosts
+                                .firstOrNull { mirrorUrl.contains(it) }
+                                ?.split(".")?.first()
+                                ?.replaceFirstChar { it.uppercase() } ?: "Mirror"
+                            episodesData.add(newEpisode(mirrorUrl) {
+                                this.name = "$qualityText [$host]"
                             })
                         }
-                    } catch (e: Exception) {
+                    } else {
+                        // Fallback: store uptobhai URL directly
                         episodesData.add(newEpisode(uptoUrl) {
                             this.name = qualityText
                         })
                     }
                 }
             } catch (e: Exception) {
-                episodesData.add(newEpisode(indimegaUrl) {
-                    this.name = "Download"
-                })
+                episodesData.add(newEpisode(indimegaUrl) { this.name = "Download" })
             }
         }
 
@@ -172,19 +199,20 @@ open class NineKMoviesProvider : MainAPI() {
     ): Boolean {
         val quality = getQualityFromUrl(data)
 
-        // Direct mirror links (streamtape, mixdrop etc) — just extract directly
+        // Direct supported host - extract immediately
         if (supportedHosts.any { data.contains(it) }) {
             loadExtractor(data, mainUrl, subtitleCallback, callback)
             return true
         }
 
-        // megaup direct mkv/mp4 link
-        if (data.contains(".mkv") || data.contains(".mp4")) {
+        // Direct video file
+        if (data.contains(".mp4") || data.contains(".mkv") || data.contains(".m3u8")) {
             callback.invoke(newExtractorLink(
                 source = name,
                 name = name,
                 url = data,
-                type = ExtractorLinkType.VIDEO
+                type = if (data.contains(".m3u8")) ExtractorLinkType.M3U8
+                       else ExtractorLinkType.VIDEO
             ) {
                 this.referer = mainUrl
                 this.quality = quality
@@ -192,43 +220,8 @@ open class NineKMoviesProvider : MainAPI() {
             return true
         }
 
-        // Fallback: try to scrape the page
-        try {
-            val doc = app.get(data, headers = ua).document
-            val body = doc.toString()
-
-            // Scan for video URLs
-            listOf(
-                Regex("""(https?://[^\s"'<>]+\.mp4[^\s"'<>]*)"""),
-                Regex("""(https?://[^\s"'<>]+\.mkv[^\s"'<>]*)"""),
-                Regex("""(https?://[^\s"'<>]+\.m3u8[^\s"'<>]*)""")
-            ).forEach { regex ->
-                regex.findAll(body).forEach { match ->
-                    val videoUrl = match.groupValues[1]
-                    if (videoUrl.startsWith("http")) {
-                        callback.invoke(newExtractorLink(
-                            source = name,
-                            name = name,
-                            url = videoUrl,
-                            type = if (videoUrl.contains(".m3u8"))
-                                ExtractorLinkType.M3U8
-                            else ExtractorLinkType.VIDEO
-                        ) {
-                            this.referer = data
-                            this.quality = quality
-                        })
-                    }
-                }
-            }
-
-            // Try all links on page
-            doc.select("a[href]")
-                .map { it.attr("abs:href") }
-                .filter { it.startsWith("http") && supportedHosts.any { h -> it.contains(h) } }
-                .forEach { loadExtractor(it, data, subtitleCallback, callback) }
-
-        } catch (e: Exception) { }
-
+        // Fallback: try as extractor
+        loadExtractor(data, mainUrl, subtitleCallback, callback)
         return true
     }
 
