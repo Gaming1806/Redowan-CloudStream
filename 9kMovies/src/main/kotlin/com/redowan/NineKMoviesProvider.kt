@@ -19,6 +19,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 open class NineKMoviesProvider : MainAPI() {
@@ -29,6 +30,9 @@ open class NineKMoviesProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val hasQuickSearch = false
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.NSFW)
+
+    // ─── Set DEBUG = true to expose each step as an episode name ───────────────
+    private val DEBUG = true
 
     private val ua = mapOf(
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -47,35 +51,39 @@ open class NineKMoviesProvider : MainAPI() {
     )
 
     override val mainPage = mainPageOf(
-        "category/18-movies/" to "18+ Movies",
-        "category/bengali/" to "Bengali",
-        "category/bollywood/" to "Bollywood",
-        "category/dual-audio/" to "Dual Audio",
+        "category/18-movies/"    to "18+ Movies",
+        "category/bengali/"      to "Bengali",
+        "category/bollywood/"    to "Bollywood",
+        "category/dual-audio/"   to "Dual Audio",
         "category/hindi-dubbed/" to "Hindi Dubbed",
-        "category/hollywood/" to "Hollywood",
-        "category/kannada/" to "Kannada",
-        "category/malayalam/" to "Malayalam",
-        "category/marathi/" to "Marathi",
-        "category/punjabi/" to "Punjabi",
-        "category/tamil/" to "Tamil",
-        "category/telugu/" to "Telugu",
-        "category/tv-shows/" to "TV Shows",
-        "category/web-series/" to "Web Series"
+        "category/hollywood/"    to "Hollywood",
+        "category/kannada/"      to "Kannada",
+        "category/malayalam/"    to "Malayalam",
+        "category/marathi/"      to "Marathi",
+        "category/punjabi/"      to "Punjabi",
+        "category/tamil/"        to "Tamil",
+        "category/telugu/"       to "Telugu",
+        "category/tv-shows/"     to "TV Shows",
+        "category/web-series/"   to "Web Series"
     )
 
+    // ─── Helpers ────────────────────────────────────────────────────────────────
+
+    private fun dbg(episodes: MutableList<Episode>, msg: String) {
+        if (DEBUG) episodes.add(newEpisode("debug::noop") { this.name = "⚙ $msg" })
+    }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val doc = app.get("$mainUrl/${request.data}page/$page", headers = ua).document
+        val doc  = app.get("$mainUrl/${request.data}page/$page", headers = ua).document
         val home = doc.select("article.thumb-block").mapNotNull { toResult(it) }
         return newHomePageResponse(request.name, home, hasNext = true)
     }
 
     private fun toResult(post: Element): SearchResponse? {
-        val url = post.selectFirst("a")?.attr("href") ?: return null
-        val title = post.selectFirst("header.entry-header span")?.text() ?: ""
+        val url      = post.selectFirst("a")?.attr("href") ?: return null
+        val title    = post.selectFirst("header.entry-header span")?.text() ?: ""
         val imageUrl = post.selectFirst("img.video-main-thumb")?.attr("src") ?: ""
-        return newMovieSearchResponse(title, url, TvType.Movie) {
-            this.posterUrl = imageUrl
-        }
+        return newMovieSearchResponse(title, url, TvType.Movie) { this.posterUrl = imageUrl }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -83,219 +91,239 @@ open class NineKMoviesProvider : MainAPI() {
         return doc.select("article.thumb-block").mapNotNull { toResult(it) }
     }
 
-    // ── FIX 1: Robust indimega URL extraction with multiple selector fallbacks ──
-    private fun extractIndimegaUrl(body: String, doc: org.jsoup.nodes.Document): String? {
-        // Try known selectors first
-        val candidates = listOf(
+    // ─── Step 1: Find the intermediate hub URL on the 9kmovies page ─────────────
+    private fun findHubUrl(html: String, doc: Document): String? {
+        val selectors = listOf(
             doc.selectFirst("a#tracking-url")?.attr("href"),
             doc.selectFirst("a.button[href*='indimega']")?.attr("href"),
             doc.selectFirst("a[href*='indimega']")?.attr("href"),
-            doc.selectFirst("a.btn[href*='indimega']")?.attr("href"),
-            doc.selectFirst("a[href*='indimega.com']")?.attr("href"),
-            // Some sites wrap the link in an iframe or redirect script
-            Regex("""indimega\.com[^\s"'<>]*""").find(body)?.value?.let { "https://$it" },
-            Regex("""["'](https?://(?:www\.)?indimega\.com/[^"']+)["']""").find(body)?.groupValues?.get(1)
+            doc.selectFirst("a[href*='indimovie']")?.attr("href"),
+            doc.selectFirst("a[href*='9klinks']")?.attr("href"),
+            doc.selectFirst("a[href*='9kmirror']")?.attr("href"),
+            doc.selectFirst("a.download-btn")?.attr("href"),
+            doc.selectFirst("a.btn-download")?.attr("href"),
+            doc.selectFirst("a[rel='nofollow'][target='_blank']")?.attr("href"),
+            // Regex fallback over raw HTML
+            Regex("""["'](https?://(?:[a-z0-9-]+\.)*(?:indimega|9klinks|9kmirror|indimovie)\.[a-z]+/[^"']+)["']""")
+                .find(html)?.groupValues?.get(1)
         )
-        return candidates.firstOrNull { !it.isNullOrBlank() }
+        return selectors.firstOrNull { !it.isNullOrBlank() }
     }
 
-    // ── FIX 2: Robust uptobhai/upto link extractor with better error surfacing ──
+    // ─── Step 2: On the hub page find buttons that link to an "upto*" domain ───
+    private fun findUptoButtons(doc: Document): List<Pair<String, String>> {
+        // Returns list of (url, label)
+        val results = mutableListOf<Pair<String, String>>()
+
+        // Try many class/attribute combinations
+        val candidates = doc.select(
+            "a.buttn, a.buttn.direct, a.direct, a.btn, a.button, " +
+            "a.download, a.btn-download, a.wp-block-button__link, " +
+            "a[href*='upto'], a[href*='uptobhai'], a[href*='uptomega']"
+        )
+
+        candidates.forEach { a ->
+            val href  = a.attr("abs:href").trim()
+            val label = a.text().trim().ifEmpty { "Download" }
+            if (href.startsWith("http") &&
+                (href.contains("upto", ignoreCase = true) ||
+                 href.contains("uptobhai", ignoreCase = true) ||
+                 href.contains("uptomega", ignoreCase = true))
+            ) {
+                results.add(href to label)
+            }
+        }
+
+        // If still empty, grab ALL anchors and dump them for debug
+        return results
+    }
+
+    // ─── Step 3: Resolve upto page → actual video mirror links ──────────────────
     private suspend fun getUptoLinks(uptoUrl: String): List<String> {
         val links = mutableListOf<String>()
-
         try {
-            // Step 1: Initial fetch – get cookies and raw HTML
-            val initialResponse = app.get(
-                uptoUrl,
-                headers = ua + mapOf("Referer" to "https://indimega.com/")
-            )
-            val cookies   = initialResponse.cookies
-            val rawHtml   = initialResponse.text
+            val r1      = app.get(uptoUrl, headers = ua + mapOf("Referer" to "https://indimega.com/"))
+            val cookies = r1.cookies
+            val html1   = r1.text
 
-            // Step 2: Try to find and call cuid unlock endpoint
-            val cuidDomain = Regex("""https://([^/"']+)/cuid/""").find(rawHtml)?.groupValues?.get(1)
+            // cuid unlock
+            val cuidDomain = Regex("""https://([^/"'\s]+)/cuid/""").find(html1)?.groupValues?.get(1)
             if (!cuidDomain.isNullOrBlank()) {
-                val uptoBase = "https://" + uptoUrl.substringAfter("://").substringBefore("/")
+                val base = "https://" + uptoUrl.substringAfter("://").substringBefore("/")
                 try {
                     app.get(
-                        "https://$cuidDomain/cuid/?f=$uptoBase",
+                        "https://$cuidDomain/cuid/?f=$base",
                         headers = ua + mapOf("Referer" to uptoUrl),
                         cookies = cookies
                     )
-                } catch (_: Exception) { /* Non-fatal – continue without unlock */ }
+                } catch (_: Exception) {}
             }
 
-            // Step 3: Re-fetch page after unlock attempt
-            val unlockedResponse = app.get(
-                uptoUrl,
-                headers = ua + mapOf("Referer" to "https://indimega.com/"),
-                cookies = cookies
-            )
-            val unlockedDoc  = unlockedResponse.document
-            val unlockedHtml = unlockedResponse.text
+            val r2   = app.get(uptoUrl, headers = ua + mapOf("Referer" to "https://indimega.com/"), cookies = cookies)
+            val doc2 = r2.document
+            val html2 = r2.text
 
-            // Step 4: Collect anchor href links that point to supported hosts
-            unlockedDoc.select("a[href]").forEach { a ->
+            // Anchors
+            doc2.select("a[href]").forEach { a ->
                 val href = a.attr("abs:href")
                 if (href.startsWith("http") &&
                     !href.contains("uptobhai", ignoreCase = true) &&
                     !href.contains("uptomega", ignoreCase = true) &&
                     supportedHosts.any { href.contains(it, ignoreCase = true) }
-                ) {
-                    links.add(href)
-                }
+                ) links.add(href)
             }
-
-            // Step 5: Scan raw HTML for direct video file URLs
-            Regex("""(https?://[^\s"'<>]+\.(?:mp4|mkv|m3u8)[^\s"'<>]*)""")
-                .findAll(unlockedHtml).forEach { links.add(it.groupValues[1]) }
-
-            // Step 6: ── FIX 3: Also scan for iframe embeds pointing to supported hosts ──
-            unlockedDoc.select("iframe[src]").forEach { iframe ->
+            // iframes
+            doc2.select("iframe[src]").forEach { iframe ->
                 val src = iframe.attr("abs:src")
                 if (src.startsWith("http") &&
                     supportedHosts.any { src.contains(it, ignoreCase = true) }
-                ) {
-                    links.add(src)
-                }
+                ) links.add(src)
             }
-
-            // Step 7: Scan for JS-embedded URLs (e.g. file:"https://...mp4")
+            // Direct video files
+            Regex("""(https?://[^\s"'<>]+\.(?:mp4|mkv|m3u8)[^\s"'<>]*)""")
+                .findAll(html2).forEach { links.add(it.groupValues[1]) }
+            // JS file: "url"
             Regex("""file\s*[=:]\s*["'](https?://[^"']+)["']""")
-                .findAll(unlockedHtml).forEach {
+                .findAll(html2).forEach {
                     val u = it.groupValues[1]
                     if (supportedHosts.any { h -> u.contains(h, ignoreCase = true) } ||
                         u.contains(".mp4") || u.contains(".m3u8")
                     ) links.add(u)
                 }
-
         } catch (e: Exception) {
-            // Surface errors to logcat so you can debug
-            android.util.Log.e("9kMovies", "getUptoLinks failed for $uptoUrl: ${e.message}")
+            android.util.Log.e("9kMovies", "getUptoLinks($uptoUrl): ${e.message}")
         }
-
         return links.distinct()
     }
 
+    // ─── load() ─────────────────────────────────────────────────────────────────
     override suspend fun load(url: String): LoadResponse {
-        val response  = app.get(url, headers = ua)
-        val doc       = response.document
-        val rawHtml   = response.text
-        val title     = doc.selectFirst("h1.entry-title")?.text() ?: ""
-        val imageUrl  = doc.selectFirst("meta[property=og:image]")?.attr("content") ?: ""
-        val story     = doc.selectFirst(".video-description")?.text()
-        val episodes  = mutableListOf<Episode>()
+        val response = app.get(url, headers = ua)
+        val doc      = response.document
+        val html     = response.text
+        val title    = doc.selectFirst("h1.entry-title")?.text() ?: ""
+        val imageUrl = doc.selectFirst("meta[property=og:image]")?.attr("content") ?: ""
+        val story    = doc.selectFirst(".video-description")?.text()
+        val eps      = mutableListOf<Episode>()
 
-        // ── FIX 1 applied: use robust extractor ──
-        val indimegaUrl = extractIndimegaUrl(rawHtml, doc)
+        // ── DEBUG: show every <a> on the main page ────────────────────────────
+        if (DEBUG) {
+            val allLinks = doc.select("a[href]")
+                .map { "${it.text().take(30)} → ${it.attr("href").take(80)}" }
+                .take(30) // limit to first 30 so it's readable
+            dbg(eps, "STEP1: Page has ${allLinks.size} anchors (showing first 30)")
+            allLinks.forEachIndexed { i, l -> dbg(eps, "  [$i] $l") }
+        }
 
-        if (!indimegaUrl.isNullOrEmpty()) {
-            try {
-                val indimegaResponse = app.get(
-                    indimegaUrl,
-                    headers = ua + mapOf("Referer" to mainUrl)
-                )
-                val indimegaDoc  = indimegaResponse.document
-                val indimegaHtml = indimegaResponse.text
+        val hubUrl = findHubUrl(html, doc)
+        dbg(eps, "STEP1 hubUrl = $hubUrl")
 
-                // ── FIX 4: Wider selector set for quality buttons ──
-                // Original code used "a.buttn.direct" – try multiple class combinations
-                val qualityButtons = indimegaDoc
-                    .select("a.buttn, a.direct, a.btn-download, a[href*='uptobhai'], a[href*='uptomega'], a[href*='upto']")
-                    .filter { it.attr("href").contains("upto", ignoreCase = true) }
-                    .ifEmpty {
-                        // Fallback: any anchor whose href contains an uptobhai/uptomega domain
-                        indimegaDoc.select("a[href]").filter { a ->
-                            val h = a.attr("href")
-                            h.contains("uptobhai") || h.contains("uptomega") || h.contains("upto.")
-                        }
-                    }
+        if (hubUrl.isNullOrEmpty()) {
+            dbg(eps, "STEP1 FAILED: no hub URL found — check anchor list above")
+            eps.add(newEpisode(url) { this.name = "Fallback: original page" })
+            return buildResponse(title, url, imageUrl, story, eps)
+        }
 
-                if (qualityButtons.isNotEmpty()) {
-                    qualityButtons.forEach { btn ->
-                        val uptoUrl     = btn.attr("href").trim()
-                        val qualityText = btn.text().trim().ifEmpty { "Download" }
-                        if (uptoUrl.isEmpty()) return@forEach
+        // ── Fetch hub page ────────────────────────────────────────────────────
+        val hubResponse = try {
+            app.get(hubUrl, headers = ua + mapOf("Referer" to mainUrl))
+        } catch (e: Exception) {
+            dbg(eps, "STEP2 FAILED fetching hub: ${e.message}")
+            return buildResponse(title, url, imageUrl, story, eps)
+        }
+        val hubDoc  = hubResponse.document
+        val hubHtml = hubResponse.text
 
-                        val mirrors = getUptoLinks(uptoUrl)
-                        if (mirrors.isNotEmpty()) {
-                            mirrors.forEach { mirrorUrl ->
-                                val hostLabel = supportedHosts
-                                    .firstOrNull { mirrorUrl.contains(it, ignoreCase = true) }
-                                    ?.split(".")?.first()
-                                    ?.replaceFirstChar { it.uppercase() } ?: "Mirror"
-                                episodes.add(newEpisode(mirrorUrl) {
-                                    this.name = "$qualityText [$hostLabel]"
-                                })
-                            }
-                        } else {
-                            // ── FIX 5: Store uptoUrl tagged so loadLinks knows what to do ──
-                            episodes.add(newEpisode("upto::$uptoUrl") {
-                                this.name = qualityText
-                            })
-                        }
-                    }
-                } else {
-                    // ── FIX 6: No quality buttons – scan indimega page directly for embeds ──
-                    indimegaDoc.select("a[href]").forEach { a ->
-                        val href = a.attr("abs:href")
-                        if (href.startsWith("http") &&
-                            supportedHosts.any { href.contains(it, ignoreCase = true) }
-                        ) {
-                            episodes.add(newEpisode(href) { this.name = a.text().trim().ifEmpty { "Watch" } })
-                        }
-                    }
-                    // Also check iframes
-                    indimegaDoc.select("iframe[src]").forEach { iframe ->
-                        val src = iframe.attr("abs:src")
-                        if (src.startsWith("http") &&
-                            supportedHosts.any { src.contains(it, ignoreCase = true) }
-                        ) {
-                            episodes.add(newEpisode(src) { this.name = "Stream" })
-                        }
-                    }
-                    // Regex sweep for direct links in raw HTML
-                    Regex("""(https?://[^\s"'<>]+\.(?:mp4|mkv|m3u8)[^\s"'<>]*)""")
-                        .findAll(indimegaHtml).forEach {
-                            episodes.add(newEpisode(it.groupValues[1]) { this.name = "Direct" })
-                        }
+        // ── DEBUG: show every <a> on the hub page ─────────────────────────────
+        if (DEBUG) {
+            val hubLinks = hubDoc.select("a[href]")
+                .map { "${it.text().take(30)} → ${it.attr("href").take(80)}" }
+                .take(30)
+            dbg(eps, "STEP2: Hub page has ${hubLinks.size} anchors")
+            hubLinks.forEachIndexed { i, l -> dbg(eps, "  [$i] $l") }
+        }
 
-                    if (episodes.isEmpty()) {
-                        episodes.add(newEpisode(indimegaUrl) { this.name = "Download" })
-                    }
+        val uptoButtons = findUptoButtons(hubDoc)
+        dbg(eps, "STEP2: found ${uptoButtons.size} upto button(s)")
+
+        if (uptoButtons.isEmpty()) {
+            // No upto buttons – try extracting links directly from hub page
+            dbg(eps, "STEP2 WARN: no upto buttons, scanning hub page directly")
+
+            hubDoc.select("a[href]").forEach { a ->
+                val href = a.attr("abs:href")
+                if (href.startsWith("http") &&
+                    supportedHosts.any { href.contains(it, ignoreCase = true) }
+                ) {
+                    eps.add(newEpisode(href) { this.name = a.text().trim().ifEmpty { "Watch" } })
+                }
+            }
+            hubDoc.select("iframe[src]").forEach { iframe ->
+                val src = iframe.attr("abs:src")
+                if (src.startsWith("http") &&
+                    supportedHosts.any { src.contains(it, ignoreCase = true) }
+                ) eps.add(newEpisode(src) { this.name = "Embed" })
+            }
+            Regex("""(https?://[^\s"'<>]+\.(?:mp4|mkv|m3u8)[^\s"'<>]*)""")
+                .findAll(hubHtml).forEach {
+                    eps.add(newEpisode(it.groupValues[1]) { this.name = "Direct" })
                 }
 
-            } catch (e: Exception) {
-                android.util.Log.e("9kMovies", "load indimega failed: ${e.message}")
-                episodes.add(newEpisode(indimegaUrl) { this.name = "Download" })
+            if (eps.none { it.data?.startsWith("debug") == false }) {
+                eps.add(newEpisode(hubUrl) { this.name = "Hub page (manual)" })
+            }
+            return buildResponse(title, url, imageUrl, story, eps)
+        }
+
+        // ── Resolve each upto URL ─────────────────────────────────────────────
+        uptoButtons.forEach { (uptoUrl, label) ->
+            dbg(eps, "STEP3: resolving $label → $uptoUrl")
+            val mirrors = getUptoLinks(uptoUrl)
+            dbg(eps, "STEP3: got ${mirrors.size} mirror(s) for $label")
+
+            if (mirrors.isNotEmpty()) {
+                mirrors.forEach { mirrorUrl ->
+                    val host = supportedHosts
+                        .firstOrNull { mirrorUrl.contains(it, ignoreCase = true) }
+                        ?.split(".")?.first()?.replaceFirstChar { it.uppercase() } ?: "Mirror"
+                    eps.add(newEpisode(mirrorUrl) { this.name = "$label [$host]" })
+                }
+            } else {
+                eps.add(newEpisode("upto::$uptoUrl") { this.name = "$label (lazy)" })
             }
         }
 
-        if (episodes.isEmpty()) {
-            episodes.add(newEpisode(url) { this.name = "Watch" })
+        if (eps.none { it.data?.startsWith("debug") == false && it.data?.startsWith("upto") == false }) {
+            eps.add(newEpisode(url) { this.name = "Fallback" })
         }
 
-        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-            this.posterUrl = imageUrl
-            this.plot = story?.trim()
-        }
+        return buildResponse(title, url, imageUrl, story, eps)
     }
 
+    private fun buildResponse(
+        title: String, url: String, imageUrl: String,
+        story: String?, eps: MutableList<Episode>
+    ) = newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps) {
+        this.posterUrl = imageUrl
+        this.plot      = story?.trim()
+    }
+
+    // ─── loadLinks() ────────────────────────────────────────────────────────────
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // ── FIX 5 handler: tagged upto URL that wasn't resolved during load() ──
+        if (data == "debug::noop") return true   // skip debug episodes silently
+
         if (data.startsWith("upto::")) {
             val uptoUrl = data.removePrefix("upto::")
             val mirrors = getUptoLinks(uptoUrl)
             if (mirrors.isNotEmpty()) {
-                mirrors.forEach { mirrorUrl -> resolveLink(mirrorUrl, subtitleCallback, callback) }
+                mirrors.forEach { resolveLink(it, subtitleCallback, callback) }
                 return true
             }
-            // If still nothing, fall through to try loadExtractor on the raw URL
             loadExtractor(uptoUrl, mainUrl, subtitleCallback, callback)
             return true
         }
@@ -303,16 +331,13 @@ open class NineKMoviesProvider : MainAPI() {
         return resolveLink(data, subtitleCallback, callback)
     }
 
-    // ── FIX 7: Centralised link resolver avoids duplicated logic ──
     private suspend fun resolveLink(
         data: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val quality = getQualityFromUrl(data)
-
         return when {
-            // Direct video file
             data.contains(".mp4", ignoreCase = true) ||
             data.contains(".mkv", ignoreCase = true) ||
             data.contains(".m3u8", ignoreCase = true) -> {
@@ -321,22 +346,17 @@ open class NineKMoviesProvider : MainAPI() {
                     name   = name,
                     url    = data,
                     type   = if (data.contains(".m3u8", ignoreCase = true))
-                                 ExtractorLinkType.M3U8
-                             else ExtractorLinkType.VIDEO
+                                 ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
                     this.referer = mainUrl
                     this.quality = quality
                 })
                 true
             }
-
-            // Known supported host – hand off to CloudStream's built-in extractor
             supportedHosts.any { data.contains(it, ignoreCase = true) } -> {
                 loadExtractor(data, mainUrl, subtitleCallback, callback)
                 true
             }
-
-            // Unknown URL – still try loadExtractor as a best-effort
             else -> {
                 loadExtractor(data, mainUrl, subtitleCallback, callback)
                 true
