@@ -72,15 +72,16 @@ open class NineKMoviesProvider : MainAPI() {
     val story = doc.selectFirst(".video-description")?.text()
     val episodesData = mutableListOf<Episode>()
 
-    // Get iframe embed link
+    // iframe (luluvid etc) - primary watch source
     val iframeSrc = doc.selectFirst(".video-player iframe")?.attr("src")
     if (!iframeSrc.isNullOrEmpty()) {
         episodesData.add(newEpisode(iframeSrc) { this.name = "Watch Online" })
     }
 
-    // Get download button link
-    doc.select("a.button[id=tracking-url]").forEach {
-        episodesData.add(newEpisode(it.attr("href")) { this.name = it.text() })
+    // download/redirect button
+    val downloadHref = doc.selectFirst("a.button#tracking-url")?.attr("href")
+    if (!downloadHref.isNullOrEmpty()) {
+        episodesData.add(newEpisode(downloadHref) { this.name = "Download" })
     }
 
     return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodesData) {
@@ -95,7 +96,28 @@ open class NineKMoviesProvider : MainAPI() {
     subtitleCallback: (SubtitleFile) -> Unit,
     callback: (ExtractorLink) -> Unit
 ): Boolean {
-    loadExtractor(data, subtitleCallback, callback)
-    return true
+    // Follow redirects to get the real URL
+    val finalUrl = app.get(data).url
+
+    // Try direct extraction on final URL
+    if (loadExtractor(finalUrl, subtitleCallback, callback)) return true
+
+    // If that fails, scrape the final page for links
+    val doc = app.get(finalUrl).document
+    doc.select("a[href]").forEach { link ->
+        val href = link.attr("abs:href")
+        if (href.contains(".mp4") || href.contains(".m3u8") ||
+            href.contains("stream") || href.contains("video")) {
+            loadExtractor(href, subtitleCallback, callback)
+        }
     }
+
+    // Also try iframe sources on the final page
+    doc.select("iframe[src]").forEach { iframe ->
+        val src = iframe.attr("abs:src")
+        if (src.isNotEmpty()) loadExtractor(src, subtitleCallback, callback)
+    }
+
+    return true
+}
 }
