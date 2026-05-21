@@ -51,7 +51,7 @@ open class NineKMoviesProvider : MainAPI() {
         return newHomePageResponse(request.name, home, hasNext = true)
     }
 
-    private fun toResult(post: Element): SearchResponse {
+    private fun toResult(post: Element): SearchResponse? {
         val url = post.selectFirst("a")?.attr("href") ?: return null
         val title = post.selectFirst("header.entry-header span")?.text() ?: ""
         val imageUrl = post.selectFirst("img.video-main-thumb")?.attr("src") ?: ""
