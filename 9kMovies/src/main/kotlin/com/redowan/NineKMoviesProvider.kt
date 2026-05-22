@@ -1,8 +1,5 @@
 package com.redowan
 
-import kotlinx.coroutines.delay
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.RequestBody.Companion.toRequestBody
 import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
@@ -145,173 +142,175 @@ open class NineKMoviesProvider : MainAPI() {
         return found.filter { isVideoUrl(it) }.map { it.trimEnd('/') }.distinct()
     }
 
-private suspend fun getUptoLinks(uptoUrl: String): List<String> {
-    val links = mutableListOf<String>()
-    android.util.Log.d("9kMovies", "getUptoLinks: $uptoUrl")
+    // ── Resolve uptobhai.blog/view/XXXXX → actual mirror URL ─────────────────
+    private suspend fun getUptoLinks(uptoUrl: String): List<String> {
+        val links = mutableListOf<String>()
+        try {
+            val fileCode = uptoUrl.trimEnd('/').substringAfterLast("/")
+            val siteBase = uptoUrl.substringBefore("://") + "://" +
+                           uptoUrl.substringAfter("://").substringBefore("/")
 
-    try {
-        val fileCode = uptoUrl.trimEnd('/').substringAfterLast("/")
-        val siteBase = uptoUrl.substringBefore("://") + "://" +
-                       uptoUrl.substringAfter("://").substringBefore("/")
+            // ── Strategy 1: Try alternative URL patterns (direct download endpoints) ──
+            // Many shortener sites have /download/ or /file/ alongside /view/
+            val altUrls = listOf(
+                uptoUrl.replace("/view/", "/download/"),
+                uptoUrl.replace("/view/", "/file/"),
+                uptoUrl.replace("/view/", "/get/"),
+                uptoUrl.replace("/view/", "/dl/"),
+                "$siteBase/download/$fileCode",
+                "$siteBase/dl/$fileCode",
+                "$siteBase/file/$fileCode",
+                "$siteBase/f/$fileCode"
+            ).filter { it != uptoUrl }.distinct()
 
-        // ── Step 1: GET the page to collect cookies + CSRF token ─────────────
-        val r1 = app.get(
-            uptoUrl,
-            headers = ua + mapOf(
-                "Referer"        to "https://indimega.com/",
-                "Accept"         to "text/html,application/xhtml+xml,*/*",
-                "Cache-Control"  to "no-cache"
-            )
-        )
-        val cookies   = r1.cookies
-        val html1     = r1.text
-        val doc1      = r1.document
+            for (altUrl in altUrls) {
+                try {
+                    val r = app.get(altUrl, headers = ua + mapOf("Referer" to uptoUrl), allowRedirects = false)
+                    val location = r.headers["location"] ?: r.headers["Location"] ?: ""
+                    // Followed-redirect final URL
+                    val rFull = if (location.isNotBlank()) {
+                        app.get(altUrl, headers = ua + mapOf("Referer" to uptoUrl))
+                    } else r
+                    val finalUrl = rFull.url
+                    if (finalUrl != altUrl && finalUrl != uptoUrl &&
+                        supportedHosts.any { finalUrl.contains(it, ignoreCase = true) }) {
+                        links.add(finalUrl)
+                        return links
+                    }
+                    links.addAll(extractUrlsFromHtml(rFull.text))
+                } catch (_: Exception) {}
+            }
+            if (links.isNotEmpty()) return links.distinct()
 
-        android.util.Log.d("9kMovies", "uptobhai page title: ${doc1.title()}")
+            // ── Strategy 2: Initial page fetch ────────────────────────────────
+            val r1      = app.get(uptoUrl, headers = ua + mapOf("Referer" to "https://indimega.com/"))
+            val cookies = r1.cookies
+            val html1   = r1.text
+            val doc1    = r1.document
+            val final1  = r1.url
 
-        // Extract CSRF token — uptobhai uses Laravel so it's always present
-        val csrfToken =
-            doc1.selectFirst("meta[name='csrf-token']")?.attr("content")
-            ?: doc1.selectFirst("input[name='_token']")?.attr("value")
-            ?: Regex(""""csrf-token"\s+content="([^"]+)"""").find(html1)?.groupValues?.get(1)
-            ?: Regex("""_token['"]\s*:\s*['"]([^'"]+)""").find(html1)?.groupValues?.get(1)
+            if (final1 != uptoUrl && supportedHosts.any { final1.contains(it, ignoreCase = true) }) {
+                return listOf(final1)
+            }
+            links.addAll(extractUrlsFromHtml(html1))
+            if (links.isNotEmpty()) return links.distinct()
 
-        android.util.Log.d("9kMovies", "csrf: $csrfToken")
+            // ── Strategy 3: POST with CSRF token (Laravel pattern) ────────────
+            // uptobhai.blog is a Laravel app — download links are returned via POST
+            val csrfToken = doc1.selectFirst("meta[name='csrf-token']")?.attr("content")
+                ?: Regex("""["']?csrf[-_]token["']?\s*(?:content=|:)\s*["']([A-Za-z0-9+/=_-]{20,})["']""")
+                    .find(html1)?.groupValues?.get(1)
+                ?: doc1.selectFirst("input[name='_token']")?.attr("value")
 
-        // ── Step 2: Look for the unlock button and its POST target ────────────
-        // uptobhai.blog unlock button usually POSTs to /unlock or same page
-        // with specific hidden fields
-        val unlockForm = doc1.selectFirst("form")
-        val formAction = unlockForm?.attr("action")?.ifBlank { uptoUrl } ?: uptoUrl
-        val formFields = mutableMapOf<String, String>()
-        unlockForm?.select("input[type=hidden]")?.forEach { input ->
-            val n = input.attr("name")
-            val v = input.attr("value")
-            if (n.isNotBlank()) formFields[n] = v
-        }
-        if (csrfToken != null) formFields["_token"] = csrfToken
-        formFields["file_code"] = fileCode
-
-        android.util.Log.d("9kMovies", "form action: $formAction, fields: $formFields")
-
-        // ── Step 3: Try every known unlock endpoint pattern ───────────────────
-
-        val unlockEndpoints = listOf(
-            // Pattern A: POST to /unlock with file code
-            Triple("$siteBase/unlock",         mapOf("code" to fileCode, "_token" to (csrfToken ?: "")), "form"),
-            // Pattern B: POST to same /view/CODE page (Laravel form submit)
-            Triple(uptoUrl,                    formFields,                                                "form"),
-            // Pattern C: POST to /view/CODE with op=unlock
-            Triple(uptoUrl,                    mapOf("_token" to (csrfToken ?: ""), "op" to "unlock", "id" to fileCode), "form"),
-            // Pattern D: POST to /get-links
-            Triple("$siteBase/get-links",      mapOf("code" to fileCode, "_token" to (csrfToken ?: "")), "form"),
-            // Pattern E: AJAX JSON POST to /api/unlock or /api/links
-            Triple("$siteBase/api/unlock",     mapOf("code" to fileCode),                                "json"),
-            Triple("$siteBase/api/links",      mapOf("code" to fileCode),                                "json"),
-            Triple("$siteBase/api/get-links",  mapOf("file_code" to fileCode),                          "json"),
-        )
-
-        for ((endpoint, data, type) in unlockEndpoints) {
-            try {
-                android.util.Log.d("9kMovies", "trying: $endpoint ($type)")
-
-                val resp = if (type == "json") {
-                    app.post(
-                        endpoint,
+            if (!csrfToken.isNullOrBlank()) {
+                // Try JSON POST (most common Laravel pattern)
+                try {
+                    val jsonPost = app.post(
+                        uptoUrl,
                         headers = ua + mapOf(
                             "Referer"          to uptoUrl,
-                            "X-CSRF-TOKEN"     to (csrfToken ?: ""),
+                            "X-CSRF-TOKEN"     to csrfToken,
                             "X-Requested-With" to "XMLHttpRequest",
-                            "Accept"           to "application/json",
+                            "Accept"           to "application/json, text/javascript, */*; q=0.01",
                             "Content-Type"     to "application/json"
                         ),
-                        requestBody = org.json.JSONObject(data.toMap()).toString()
-                            .toRequestBody("application/json".toMediaType()),
-                        cookies = cookies
-                    )
-                } else {
-                    app.post(
-                        endpoint,
-                        headers = ua + mapOf(
-                            "Referer" to uptoUrl,
-                            "Accept"  to "text/html,application/xhtml+xml,*/*"
+                        requestBody = okhttp3.RequestBody.create(
+                            okhttp3.MediaType.parse("application/json"),
+                            """{"file_code":"$fileCode","_token":"$csrfToken"}"""
                         ),
-                        data    = data,
                         cookies = cookies
                     )
-                }
-
-                val respHtml = resp.text
-                val respDoc  = resp.document
-                android.util.Log.d("9kMovies", "response length: ${respHtml.length}, url: ${resp.url}")
-
-                // ── Parse all anchor links from the response ──────────────────
-                respDoc.select("a[href]").forEach { a ->
-                    val href = a.attr("abs:href").trim()
-                    if (href.startsWith("http") &&
-                        !href.contains("uptobhai", ignoreCase = true) &&
-                        !href.contains("uptomega", ignoreCase = true)
-                    ) {
-                        android.util.Log.d("9kMovies", "found link: $href")
-                        links.add(href)
-                    }
-                }
-
-                // ── Parse JSON response if present ────────────────────────────
-                try {
-                    val json = org.json.JSONObject(respHtml)
-                    listOf("url","link","file","download","src","href","redirect","links").forEach { key ->
-                        val v = json.optString(key, "")
-                        if (v.startsWith("http")) links.add(v)
-                        // handle array of links
-                        val arr = json.optJSONArray(key)
-                        if (arr != null) {
-                            for (i in 0 until arr.length()) {
-                                val item = arr.optString(i, "")
-                                if (item.startsWith("http")) links.add(item)
-                            }
+                    val jsonText = jsonPost.text
+                    val jsonFinal = jsonPost.url
+                    if (supportedHosts.any { jsonFinal.contains(it, ignoreCase = true) }) links.add(jsonFinal)
+                    links.addAll(extractUrlsFromHtml(jsonText))
+                    try {
+                        val json = org.json.JSONObject(jsonText)
+                        listOf("url","link","file","download","src","href","redirect").forEach { key ->
+                            val v = json.optString(key, "")
+                            if (v.startsWith("http")) links.add(v)
                         }
-                    }
+                    } catch (_: Exception) {}
                 } catch (_: Exception) {}
 
-                // ── Scan raw HTML for video URLs ──────────────────────────────
-                links.addAll(extractUrlsFromHtml(respHtml))
-
-                if (links.isNotEmpty()) {
-                    android.util.Log.d("9kMovies", "✅ found ${links.size} links at $endpoint")
-                    return links.distinct()
-                }
-
-            } catch (e: Exception) {
-                android.util.Log.e("9kMovies", "endpoint $endpoint failed: ${e.message}")
+                // Try form POST
+                try {
+                    val formPost = app.post(
+                        uptoUrl,
+                        headers = ua + mapOf(
+                            "Referer"      to uptoUrl,
+                            "Content-Type" to "application/x-www-form-urlencoded",
+                            "Accept"       to "text/html,application/xhtml+xml,*/*"
+                        ),
+                        data = mapOf("_token" to csrfToken, "file_code" to fileCode, "op" to "download2"),
+                        cookies = cookies
+                    )
+                    val formFinal = formPost.url
+                    if (supportedHosts.any { formFinal.contains(it, ignoreCase = true) }) links.add(formFinal)
+                    links.addAll(extractUrlsFromHtml(formPost.text))
+                } catch (_: Exception) {}
             }
-        }
+            if (links.isNotEmpty()) return links.distinct()
 
-        // ── Step 4: Final fallback — re-fetch page after a short delay ────────
-        // Some sites use JS timers (wait 5s, then button appears).
-        // We simulate this by waiting and re-fetching.
-        kotlinx.coroutines.delay(3000)
-        val r2   = app.get(uptoUrl, headers = ua + mapOf("Referer" to "https://indimega.com/"), cookies = cookies)
-        val doc2 = r2.document
-        val html2 = r2.text
-
-        doc2.select("a[href]").forEach { a ->
-            val href = a.attr("abs:href").trim()
-            if (href.startsWith("http") &&
-                !href.contains("uptobhai", ignoreCase = true) &&
-                !href.contains("uptomega", ignoreCase = true)) {
-                links.add(href)
+            // ── Strategy 4: cuid unlock + re-fetch ───────────────────────────
+            val cuidDomain = Regex("""https://([^/"'\s]+)/cuid/""").find(html1)?.groupValues?.get(1)
+            if (!cuidDomain.isNullOrBlank()) {
+                try {
+                    app.get("https://$cuidDomain/cuid/?f=$siteBase",
+                        headers = ua + mapOf("Referer" to uptoUrl), cookies = cookies)
+                } catch (_: Exception) {}
             }
-        }
-        links.addAll(extractUrlsFromHtml(html2))
 
-    } catch (e: Exception) {
-        android.util.Log.e("9kMovies", "getUptoLinks error: ${e.message}")
+            val r2     = app.get(uptoUrl, headers = ua + mapOf("Referer" to "https://indimega.com/"), cookies = cookies)
+            val final2 = r2.url
+            val html2  = r2.text
+
+            if (final2 != uptoUrl && supportedHosts.any { final2.contains(it, ignoreCase = true) }) {
+                return listOf(final2)
+            }
+            links.addAll(extractUrlsFromHtml(html2))
+
+            // DOM anchors and iframes
+            val doc2 = r2.document
+            doc2.select("a[href]").forEach { a ->
+                val href = a.attr("abs:href")
+                if (href.startsWith("http") &&
+                    !href.contains("uptobhai", ignoreCase = true) &&
+                    !href.contains("uptomega", ignoreCase = true) &&
+                    supportedHosts.any { href.contains(it, ignoreCase = true) }
+                ) links.add(href)
+            }
+            doc2.select("iframe[src]").forEach { iframe ->
+                val src = iframe.attr("abs:src")
+                if (src.startsWith("http") && supportedHosts.any { src.contains(it, ignoreCase = true) })
+                    links.add(src)
+            }
+
+            // ── Strategy 5: Follow any "Get Link" / "Click Here" button ──────
+            val goBtn = doc2.select("a[href]").firstOrNull { a ->
+                val cls = a.className().lowercase()
+                val txt = a.text().lowercase()
+                (cls.contains("get") || cls.contains("download") || cls.contains("go") ||
+                 txt.contains("get link") || txt.contains("download") ||
+                 txt.contains("click here") || txt.contains("continue") || txt.contains("proceed")) &&
+                a.attr("href").startsWith("http") &&
+                !a.attr("href").contains("uptobhai", ignoreCase = true)
+            }?.attr("abs:href")
+
+            if (!goBtn.isNullOrBlank()) {
+                try {
+                    val r3    = app.get(goBtn, headers = ua + mapOf("Referer" to uptoUrl), cookies = cookies)
+                    val final3 = r3.url
+                    if (supportedHosts.any { final3.contains(it, ignoreCase = true) }) links.add(final3)
+                    links.addAll(extractUrlsFromHtml(r3.text))
+                } catch (_: Exception) {}
+            }
+
+        } catch (e: Exception) {
+            android.util.Log.e("9kMovies", "getUptoLinks($uptoUrl): ${e.message}")
+        }
+        return links.distinct()
     }
-
-    android.util.Log.d("9kMovies", "getUptoLinks result: $links")
-    return links.distinct()
-}
 
     override suspend fun load(url: String): LoadResponse {
         val response = app.get(url, headers = ua)
