@@ -19,6 +19,8 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
@@ -214,10 +216,8 @@ open class NineKMoviesProvider : MainAPI() {
                             "Accept"           to "application/json, text/javascript, */*; q=0.01",
                             "Content-Type"     to "application/json"
                         ),
-                        requestBody = okhttp3.RequestBody.create(
-                            okhttp3.MediaType.parse("application/json"),
-                            """{"file_code":"$fileCode","_token":"$csrfToken"}"""
-                        ),
+                        requestBody = """{"file_code":"$fileCode","_token":"$csrfToken"}"""
+                            .toRequestBody("application/json".toMediaType()),
                         cookies = cookies
                     )
                     val jsonText = jsonPost.text
