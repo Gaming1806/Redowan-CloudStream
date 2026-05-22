@@ -19,7 +19,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.coroutines.delay
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.jsoup.nodes.Document
@@ -219,7 +218,7 @@ open class NineKMoviesProvider : MainAPI() {
             }
 
             // Small delay to let server-side unlock propagate
-            delay(1500)
+            Thread.sleep(1500)
 
             // ── STEP 4: Re-fetch the page — links should now be visible ───────
             val r2   = app.get(
@@ -285,7 +284,7 @@ open class NineKMoviesProvider : MainAPI() {
                             ),
                             cookies = cookies
                         )
-                        delay(1000)
+                        Thread.sleep(1000)
                         val r3 = app.get(uptoUrl, headers = ua + mapOf("Referer" to uptoUrl), cookies = cookies)
                         r3.document.select("a[href]").forEach { a ->
                             val href = a.attr("abs:href").trim()
